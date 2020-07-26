@@ -54,22 +54,36 @@ class lidar_control():
         self.dev = self.context.query_devices()
         self.pipeline = rs.pipeline(self.context)
 
-        self.pipeline_profile = self.start(self.config)
-        self.rs_dev = pipeline_profile.get_device()
-        self.device_name = self.rs_dev.get_info(rs.camera_info.name)
-        print(self.device_name)
-        self.stop()
+        self.pipeline_profile = self.start(config=self.config)
+
+        if self.pipeline_profile:
+            self.rs_dev = self.pipeline_profile.get_device()
+            self.device_name = self.rs_dev.get_info(rs.camera_info.name)
+            print(self.device_name)
+        else:
+            self.rs_dev = None
+            self.device_name = None
+            print("no device found")
+
+        self.pipeline_profile = self.stop()
         
     def start(self,pipeline=None,config=None):
         pipeline = pipeline or self.pipeline
         config = config or self.config
-        self.pipeline_profile = pipeline.start(config)
-        return self.pipeline_profile
+        try:
+            self.pipeline_profile = pipeline.start(config)
+            return self.pipeline_profile
+        except:
+            return None
 
     def stop(self,pipeline=None):
         pipeline = pipeline or self.pipeline
-        pipeline.stop()
+        try:
+            pipeline.stop()
+        except:
+            print("failed attempt to stop")
         self.pipeline_profile = None
+        return self.pipeline_profile
 
     def convert_fmt(self,fmt):
         '''
@@ -272,7 +286,8 @@ class lidar_control():
 
 def main():
     l = lidar_control()
+    l.init()
     print(l)
 
 if __name__== "__main__" :
-    main()
+    mai     
