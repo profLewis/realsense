@@ -31,7 +31,7 @@ class lidar_control():
 
     '''
  
-    def __main__(self,decimate_scale=None,postprocessing=None,\
+    def __init__(self,decimate_scale=0,postprocessing=None,\
                       color=None,colour=None,\
                       nir=None):
         '''
@@ -41,8 +41,9 @@ class lidar_control():
         self.postprocessing = False or postprocessing
         self.color = (colour or color) or False
         self.nir = nir or False
+        self.camera = []
 
-    def init(self):
+    def init(self,stop=True):
         '''
         find attached devices as start pipelines
 
@@ -64,8 +65,12 @@ class lidar_control():
             self.rs_dev = None
             self.device_name = None
             print("no device found")
-
-        self.pipeline_profile = self.stop()
+       
+        if stop:
+            self.pipeline_profile = self.stop()
+            return 1
+        else:
+            return self.pipeline_profile
         
     def start(self,pipeline=None,config=None):
         pipeline = pipeline or self.pipeline
@@ -101,88 +106,90 @@ class lidar_control():
         }[fmt]
 
 
-    def init_camera(self):
-        pass
+    def purge_camera(self):
+        del self.camnera
+        self.camera = []
 
-    def read_from_camera(self,decimate_scale=0,postprocessing=False,color=False):
+    def read_from_camera(self,size=(1024,768),\
+                              fps=30,sample_rate=200):
         #start the frames pipe
 
         p = self.pipeline
         conf = self.config
 
+        camera = {}
+
         # enable individual streams
-        conf.enable_stream(rs.stream.depth, 1024, 768, rs.format.z16, 30)
-        other_nir_stream, other_nir_format = rs.stream.infrared, rs.format.y8
-        other_stream, other_format = rs.stream.color, rs.format.rgb8
-        conf.enable_stream(other_stream, 1920, 1080, other_format, 30)
-        conf.enable_stream(other_nir_stream, 1024, 768, other_nir_format, 30)
+        conf.enable_stream(rs.stream.depth, size[0],size[1], rs.format.z16, fps)
+        camera['nir_stream'], camera['nir_format'] = rs.stream.infrared, rs.format.y8
+        camera['image_stream'], camera['image_format'] = rs.stream.color, rs.format.rgb8
+        conf.enable_stream(camera['image_stream'], size[0], size[1], camera['image_format'], sample_rate)
+        conf.enable_stream(camera['nir_stream'], size[1], size[1], camera['nir_format'], sample_rate)
         conf.enable_stream(rs.stream.accel,rs.format.motion_xyz32f,200)
         conf.enable_stream(rs.stream.gyro,rs.format.motion_xyz32f,200)
-    
-        try:
-            prof = self.start(config=conf)
-        except:
-            print('failed to start connection to device')
-            return 0
-    
+
         profile = p.get_active_profile()
-        depth_sensor = profile.get_device().first_depth_sensor()
-        depth_scale = depth_sensor.get_depth_scale()
-        depth_profile = rs.video_stream_profile(profile.get_stream(rs.stream.depth))
-        depth_intrinsics = depth_profile.get_intrinsics()
-        w, h = depth_intrinsics.width, depth_intrinsics.height
+        camera['depth_sensor'] = profile.get_device().first_depth_sensor()
+        camera['depth_scale'] = camera['depth_sensor'].get_depth_scale()
+        camera['depth_profile'] = rs.video_stream_profile(profile.get_stream(rs.stream.depth))
+        camera['depth_intrinsics'] = camera['depth_profile'].get_intrinsics()
+        camera['w'], camera['h'] = camera['depth_intrinsics'].width, camera['depth_intrinsics'].height
         # 
         # 
 
-        if decimate_scale > 0:
+        if self.decimate_scale > 0:
             decimate = rs.decimation_filter()
             decimate.set_option(rs.option.filter_magnitude, int(2 ** decimate_level))
         
         colorizer = rs.colorizer()
     
         if self.postprocessing:
-            filters = [rs.disparity_transform(),
+            camera['filters'] = [rs.disparity_transform(),
                rs.spatial_filter(),
                rs.temporal_filter(),
                rs.disparity_transform(False)]
 
-        frames = p.wait_for_frames()
-        print(frames is not None)
-        print(frames)
-        if not frames:
+        '''
+        grab the frames
+        '''
+        camera['frames'] = p.wait_for_frames()
+
+        if not camera['frames']:
+            print('No frames from camera')
             return 0
 
-        depth_frame = frames.get_depth_frame().as_video_frame()
-        other_frame = frames.first(other_stream).as_video_frame()
-        other_nir_frame = frames.first(other_nir_stream).as_video_frame()
+        camera['depth_frame'] = camera['frames'].get_depth_frame().as_video_frame()
+        camera['image_frame'] = camera['frames'].first(camera['image_stream']).as_video_frame()
+        camera['nir_frame'] = camera['frames'].first(camera['nir_stream']).as_video_frame()
  
         if self.decimate_scale > 0:
-            depth_frame = decimate.process(depth_frame)
+            camera['depth_frame'] = decimate.process(camera['depth_frame'])
 
         if self.postprocessing:
-            for f in filters:
-                depth_frame = f.process(depth_frame)
+            for f in camera['filters']:
+                camera['depth_frame'] = f.process(camera['depth_frame'])
 
         # Grab new intrinsics (may be changed by decimation)
-        depth_intrinsics = rs.video_stream_profile(depth_frame.profile).get_intrinsics()
-        self.w, self.h = depth_intrinsics.width, depth_intrinsics.height
+        camera['depth_intrinsics'] = rs.video_stream_profile(camera['depth_frame'].profile).get_intrinsics()
+        camera['w'], camera['h'] = camera['depth_intrinsics'].width, camera['depth_intrinsics'].height
 
-        color_data = np.asanyarray(other_frame.get_data())
-        depth_data = np.asanyarray(depth_frame.get_data())
-        nir_data = np.asanyarray(other_nir_frame.get_data())
+        camera['data'] = {}
+        camera['data']['image'] = np.asanyarray(camera['image_frame'].get_data())
+        camera['data']['depth'] = np.asanyarray(camera['depth_frame'].get_data())
+        camera['data']['nir']  = np.asanyarray(camera['nir_frame'].get_data())
 
-        colorized_depth = colorizer.colorize(depth_frame)
-        depth_colormap = np.asanyarray(colorized_depth.get_data())
+        camera['colorized_depth'] = colorizer.colorize(camera['depth_frame'])
+        camera['data']['depth_picture'] = np.asanyarray(camera['colorized_depth'].get_data())
 
-        if self.color:
-            mapped_frame, color_source = other_frame, color_image
-        else:
-            mapped_frame, color_source = colorized_depth, depth_colormap
+        f = [camera['data']['depth'],camera['data']['nir'],\
+             camera['data']['image'],camera['data']['depth_picture']]
 
-        result = [i for i in [np.asanyarray(frame) for frame in f] if len(i)]
+        camera['result'] = [i for i in [np.asanyarray(frame) for frame in f] if len(i)]
         '''result[0] = depth_scale * result[0]'''
         self.stop()
+        self.camera.append(camera)
         print('Done')
+        return camera
     
     # copy our data to pre-allocated buffers, this is faster than assigning...
     # pyglet will take care of uploading to GPU
@@ -286,8 +293,9 @@ class lidar_control():
 
 def main():
     l = lidar_control()
-    l.init()
+    l.init(stop=False)
+    l.read_from_camera()
     print(l)
 
 if __name__== "__main__" :
-    mai     
+    main()
