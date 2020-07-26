@@ -111,6 +111,27 @@ class lidar_control():
         del self.camnera
         self.camera = []
 
+    def get_pointcloud(self,depth_frame,image_frame,pc_file=None):
+        '''
+        get pointcloud data from depth and image frames
+
+        option to save to ply file if pc_file is set
+
+        '''
+        pc = rs.pointcloud()
+        pc.map_to(image_frame)
+        points = pc.calculate(depth_frame)
+
+        camera = {}
+        camera['pc'] = pc
+        camera['points'] = points
+        if pc_file:
+            camera['pc_file'] = pc_file
+            print(f'writing point cloud to {pc_file}')
+            points.export_to_ply(pc_file,image_frame)
+
+        return camera
+
     def read_from_camera(self,size=(1024,768),\
                               fps=30,sample_rate=200):
         #start the frames pipe
@@ -159,38 +180,36 @@ class lidar_control():
             print('No frames from camera')
             return 0
 
-        camera['depth_frame'] = camera['frames'].get_depth_frame().as_video_frame()
-        camera['image_frame'] = camera['frames'].first(camera['image_stream']).as_video_frame()
-        camera['nir_frame'] = camera['frames'].first(camera['nir_stream']).as_video_frame()
+        camera['depth'] = camera['frames'].get_depth_frame().as_video_frame()
+        camera['color'] = camera['frames'].first(camera['image_stream']).as_video_frame()
+        camera['nir'] = camera['frames'].first(camera['nir_stream']).as_video_frame()
  
         if self.decimate_scale > 0:
-            camera['depth_frame'] = decimate.process(camera['depth_frame'])
+            camera['depth'] = decimate.process(camera['depth'])
 
         if self.postprocessing:
             for f in camera['filters']:
-                camera['depth_frame'] = f.process(camera['depth_frame'])
+                camera['depth'] = f.process(camera['depth'])
 
         # Grab new intrinsics (may be changed by decimation)
-        camera['depth_intrinsics'] = rs.video_stream_profile(camera['depth_frame'].profile).get_intrinsics()
+        camera['depth_intrinsics'] = rs.video_stream_profile(camera['depth'].profile).get_intrinsics()
         camera['w'], camera['h'] = camera['depth_intrinsics'].width, camera['depth_intrinsics'].height
 
-        camera['data'] = {}
-        camera['data']['image'] = np.asanyarray(camera['image_frame'].get_data())
-        camera['data']['depth'] = np.asanyarray(camera['depth_frame'].get_data())
-        camera['data']['nir']  = np.asanyarray(camera['nir_frame'].get_data())
+        camera['colorized_depth'] = colorizer.colorize(camera['depth'])
 
-        camera['colorized_depth'] = colorizer.colorize(camera['depth_frame'])
-        camera['data']['depth_picture'] = np.asanyarray(camera['colorized_depth'].get_data())
-
-        f = [camera['data']['depth'],camera['data']['nir'],\
-             camera['data']['image'],camera['data']['depth_picture']]
-
-        camera['result'] = [i for i in [np.asanyarray(frame) for frame in f] if len(i)]
-        '''result[0] = depth_scale * result[0]'''
         self.stop()
         self.camera.append(camera)
         print('Done')
         return camera
+
+    def to_np(self,frames):
+        '''
+        convert camera rs data to numpy arrays
+
+        assume 
+        '''
+        results = [np.asanyarray(f.get_data()) for f in frames]
+        return results
     
     # copy our data to pre-allocated buffers, this is faster than assigning...
     # pyglet will take care of uploading to GPU
@@ -251,13 +270,16 @@ class lidar_control():
         if keys[pyglet.window.key.E]:
             points.export_to_ply('./out.ply', mapped_frame)
 
-    def plot(self,result,centiles=None,\
+    def plot(self,frames,centiles=None,\
                          titles=None,\
                          cmaps=None,\
                          figsize=None,\
                          file=None,\
                          dummy=False,\
                          transpose=False):
+
+
+        result = self.to_np(frames)
 
         if dummy:
             matplotlib.use('Agg')
@@ -276,6 +298,7 @@ class lidar_control():
         titles = titles or ['range','NIR','colour','colourised depth']
         print (shape)
         centiles = centiles or [(10,70),(25,95),(25,75),(5,95)]
+      
         for i in range(nr):
             try:
                 r = np.array(result[i].copy())
@@ -300,8 +323,14 @@ def main():
     l = lidar_control()
     l.init(stop=False)
     camera = l.read_from_camera()
-    l.plot(camera['result'],dummy=True,file='result.png')
-    print(l)
+    
+    camera['pc'] = l.get_pointcloud(camera['depth'],\
+                          camera['color'],\
+                          pc_file='points.ply')
+
+    frames = [camera['depth'],camera['nir'],camera['color'],camera['colorized_depth']]
+    l.plot(frames,dummy=True,file='result.png')
+
 
 if __name__== "__main__" :
     main()
