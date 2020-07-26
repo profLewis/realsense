@@ -10,6 +10,7 @@ except:
     print("no cv2 available")
 
 import numpy as np                        # fundamental package for scientific computing
+import matplotlib
 import matplotlib.pyplot as plt           # 2D plotting library producing publication quality figures
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import pyrealsense2 as rs                 # Intel RealSense cross-platform open-source API
@@ -253,9 +254,13 @@ class lidar_control():
     def plot(self,result,centiles=None,\
                          titles=None,\
                          cmaps=None,\
-                         file=None,
+                         figsize=None,\
+                         file=None,\
+                         dummy=False,\
                          transpose=False):
 
+        if dummy:
+            matplotlib.use('Agg')
         figsize = figsize or (20,20)
         nr = (2 * ((len (result) +1)// 2))
         print(nr)
@@ -294,7 +299,8 @@ class lidar_control():
 def main():
     l = lidar_control()
     l.init(stop=False)
-    l.read_from_camera()
+    camera = l.read_from_camera()
+    l.plot(camera['result'],dummy=True,file='result.png')
     print(l)
 
 if __name__== "__main__" :
