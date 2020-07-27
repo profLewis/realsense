@@ -34,20 +34,23 @@ class lidar_control():
     '''
  
     def __init__(self,decimate_scale=0,postprocessing=None,\
-                      color=None,colour=None,\
-                      nir=None,\
+                      color=True,colour=True,\
+                      nir=True,depth=True,\
                       verbose=True):
         '''
         setup
         '''
         self.decimate_scale = 0 or decimate_scale
         self.postprocessing = False or postprocessing
-        self.color = (colour or color) or False
-        self.nir = nir or False
-        self.camera = []
+        self.depth = depth
+        self.color = (colour or color)
+        self.nir = nir
         self.settings = {}
-        self.verbose = verbose
         self.dev = None
+        self.verbose = verbose
+
+        # active device lists
+        self.active_devices = []
 
     def init(self,stop=True,self_test=True):
         '''
@@ -57,7 +60,6 @@ class lidar_control():
         https://github.com/IntelRealSense/librealsense/tree/master/examples/multicam
 
         '''
-
         self.context = rs.context()
         self.config = rs.config()
 
@@ -66,16 +68,12 @@ class lidar_control():
         # we store this as text in self.dev_info
         #
         self.active_devices = self.start_all_devices()
-        self.sensors = self.context.query_all_sensors()
-        print(self.sensors)
        
         if stop:
             self.stop_all_devices(self.active_devices)
             return 1
-        else:
-            return self.pipeline_profile
-
-    def start_all_devices(self,reload=True,verbose=False):
+        
+    def start_all_devices(self,reload=True,verbose=False,active_devices=None):
         '''
         start all attached devices
 
@@ -85,38 +83,53 @@ class lidar_control():
         '''
         self.dev = (not reload and self.dev) or self.context.query_devices()
         verbose = verbose or self.verbose
+        active_devices = active_devices or self.active_devices
 
-        pipelines = []
-        dev_infos = []
-        pipeline_profiles = []
-        for d in self.dev:
-            pipe = rs.pipeline(self.context)
-            dev_info = self.get_sensor_info(d)
-            self.config.enable_device(dev_info['serial_number'])
-            pipeline_profile = self.start(pipeline=pipe,config=self.config)
-            if (self.verbose):
-                print(f'started {dev_info["name"]} S/N: {dev_info["serial_number"]}')
-            # store in list
-            pipelines.append(pipe)
-            dev_infos.append(dev_info)
-            pipeline_profiles.append(pipeline_profile)
-        self.active_devices = {'dev': self.dev,\
-                'pipelines':pipelines,\
-                'dev_infos':dev_infos,\
-                'pipeline_profiles':pipeline_profiles}
-        return self.active_devices
+        #
+        # try to stop any hanging devices
+        #
+        self.stop_all_devices(active_devices,verbose)
+
+        #
+        # loop over devices
+        #
+        for i,d in enumerate(self.dev):
+            if(verbose):
+                print(f'device {i} of {len(self.dev)}')
+            device = {'device':d}
+            device['pipe'] = rs.pipeline(self.context)
+            device['device_info'] = self.get_device_info(d)
+            self.config.enable_device(device['device_info']['serial_number'])
+            device['pipeline_profile'] = self.start(pipeline=device['pipe'],config=self.config)
+            #
+            # get the sensors on this device
+            #
+            device['sensors'] = device['pipeline_profile'].get_device().query_sensors()
+            if (verbose):
+                print('started {name} S/N: {serial_number}'.format(**device['device_info']))
+            device['camera'] = self.enable_stream(device)
+            active_devices.append(device)
+
+        self.active_devices = active_devices
+        return active_devices
        
  
     def stop_all_devices(self,active_devices=None,verbose=False):
         active_devices = active_devices or self.active_devices
         verbose = self.verbose or verbose
+       
+        for device in active_devices:
+             try:
+                self.stop(pipeline=device['pipe'])
+                if verbose:
+                    print('stopped {name} S/N: {serial_number}'.format(**device['device_info']))    
+             except:
+                pass
 
-        for pipe,dev_info in zip(active_devices['pipelines'],active_devices['dev_infos']):
-            self.stop(pipeline=pipe)
-            if verbose:
-                print(f'stopped {dev_info["name"]} S/N: {dev_info["serial_number"]}')               
+        self.active_devices = []
+        return active_devices
 
-    def get_sensor_info(self,dev):
+    def get_device_info(self,dev):
         camera_info = {}
         for k in rs.camera_info.__members__.keys():
             try:
@@ -159,10 +172,6 @@ class lidar_control():
         }[fmt]
 
 
-    def purge_camera(self):
-        del self.camnera
-        self.camera = []
-
     def load_settings(self,filename,append=False):
         '''
         load settings from json file
@@ -202,33 +211,87 @@ class lidar_control():
 
         return camera
 
-    def read_from_camera(self,size=(1024,768),\
-                              fps=30,sample_rate=200):
-        #start the frames pipe
+    def is_nir_sensor(self,s):
+        '''
+        This is missing from librealsense, so hack it
+        supposing that if we arent color or depth, we are NIR
 
-        p = self.pipeline
+        Could refine this -- eg has same size as depth
+        '''
+        return (not s.is_depth_sensor()) and (not s.is_color_sensor())
+
+    def enable_stream(self,device,\
+                           depth=True,nir=True,colour=True,color=False,\
+                           size=(1024,768),image_size=None,\
+                           verbose=False,\
+                           fps=30,sample_rate=200):
+        '''
+        enable device stream for a single device
+        for all sensors in device['sensors']
+        '''
+        depth = depth or self.depth
+        color = (colour or color) or self.color
+        nir = nir or self.nir
+        verbose = verbose or self.verbose
+
         conf = self.config
+        profile = device['pipeline_profile']
+        dev = device['device']
 
-        camera = {}
+        camera = {'depth_scale':0}
 
-        # enable individual streams
-        conf.enable_stream(rs.stream.depth, size[0],size[1], rs.format.z16, fps)
-        camera['nir_stream'], camera['nir_format'] = rs.stream.infrared, rs.format.y8
-        camera['image_stream'], camera['image_format'] = rs.stream.color, rs.format.rgb8
-        conf.enable_stream(camera['image_stream'], size[0], size[1], camera['image_format'], sample_rate)
-        conf.enable_stream(camera['nir_stream'], size[1], size[1], camera['nir_format'], sample_rate)
-        conf.enable_stream(rs.stream.accel,rs.format.motion_xyz32f,200)
-        conf.enable_stream(rs.stream.gyro,rs.format.motion_xyz32f,200)
+	# lets see what sensors we have
+        # there is no self.is_nir_sensor()
+        # so we have a placeholder
+        info = {
+            'nir'   : (rs.stream.infrared, 0, *size, rs.format.y8,fps),
+            'color' : (rs.stream.color, 0, *(image_size or size), rs.format.rgb8,fps),
+            'depth' : (rs.stream.depth, 0, *size, rs.format.z16,fps)
+        }
 
-        profile = p.get_active_profile()
-        camera['depth_sensor'] = profile.get_device().first_depth_sensor()
-        camera['depth_scale'] = camera['depth_sensor'].get_depth_scale()
+        camera['sets'] = []
+        camera['sensors'] = []
+        for i,s in enumerate(device['sensors']):
+
+            if verbose:
+                print(f'sensor {i} of {len(device["sensors"])}')
+
+            settings =  ((depth and s.is_depth_sensor() and info['depth']) or \
+                        (nir and self.is_nir_sensor(s) and info['nir']) or \
+                        (color and s.is_color_sensor() and info['color']))
+            settings = list(settings)
+            settings[1] = i
+            if verbose:
+                print(f'stream settings: {settings}')
+            conf.enable_stream(*settings)
+
+            sensor  =  (depth and s.is_depth_sensor() and dev.first_depth_sensor()) or \
+                        (nir and self.is_nir_sensor(s) and dev.first_infrared_sensor()) or \
+                        (color and s.is_color_sensor() and dev.first_color_sensor())
+
+            print(f'sensor: {sensor}')
+
+            try:
+                camera['depth_scale'] = camera['depth_scale'] or (depth and s.is_depth_sensor() and sensor.get_depth_scale())
+            except:
+                pass
+            camera['sets'].append(settings)
+            camera['sensors'].append(sensor)
+
+        imu_streams = (rs.stream.accel,rs.stream.gyro)
+        imu_formats = (rs.format.motion_xyz32f, rs.format.motion_xyz32f)
+        imu_rates   = (sample_rate,sample_rate)
+
+        for s,f,r in zip(imu_streams,imu_formats,imu_rates):
+            conf.enable_stream(s, f, r)
+
         camera['depth_profile'] = rs.video_stream_profile(profile.get_stream(rs.stream.depth))
         camera['depth_intrinsics'] = camera['depth_profile'].get_intrinsics()
         camera['w'], camera['h'] = camera['depth_intrinsics'].width, camera['depth_intrinsics'].height
-        # 
-        # 
+        return camera
 
+    def nono(self):
+  
         if self.decimate_scale > 0:
             decimate = rs.decimation_filter()
             decimate.set_option(rs.option.filter_magnitude, int(2 ** decimate_level))
@@ -240,6 +303,8 @@ class lidar_control():
                rs.spatial_filter(),
                rs.temporal_filter(),
                rs.disparity_transform(False)]
+
+    def get_frames(self,camera,p):
 
         '''
         grab the frames
@@ -403,6 +468,7 @@ def main():
     frames = [camera['depth'],camera['nir'],camera['color'],camera['colorized_depth']]
     l.plot(frames,dummy=True,file='result.png')
 
+    l.stop_all_devices()
 
 if __name__== "__main__" :
     main()
