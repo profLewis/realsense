@@ -14,6 +14,7 @@ import matplotlib
 import matplotlib.pyplot as plt           # 2D plotting library producing publication quality figures
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import pyrealsense2 as rs                 # Intel RealSense cross-platform open-source API
+import json
 
 try:
     import pyglet
@@ -34,7 +35,8 @@ class lidar_control():
  
     def __init__(self,decimate_scale=0,postprocessing=None,\
                       color=None,colour=None,\
-                      nir=None):
+                      nir=None,\
+                      verbose=True):
         '''
         setup
         '''
@@ -43,35 +45,85 @@ class lidar_control():
         self.color = (colour or color) or False
         self.nir = nir or False
         self.camera = []
+        self.settings = {}
+        self.verbose = verbose
+        self.dev = None
 
-    def init(self,stop=True):
+    def init(self,stop=True,self_test=True):
         '''
         find attached devices as start pipelines
 
         context derived from
         https://github.com/IntelRealSense/librealsense/tree/master/examples/multicam
+
         '''
+
         self.context = rs.context()
         self.config = rs.config()
-        self.dev = self.context.query_devices()
-        self.pipeline = rs.pipeline(self.context)
 
-        self.pipeline_profile = self.start(config=self.config)
-
-        if self.pipeline_profile:
-            self.rs_dev = self.pipeline_profile.get_device()
-            self.device_name = self.rs_dev.get_info(rs.camera_info.name)
-            print(self.device_name)
-        else:
-            self.rs_dev = None
-            self.device_name = None
-            print("no device found")
+        #
+        # possible multiple devices
+        # we store this as text in self.dev_info
+        #
+        self.active_devices = self.start_all_devices()
+        self.sensors = self.context.query_all_sensors()
+        print(self.sensors)
        
         if stop:
-            self.pipeline_profile = self.stop()
+            self.stop_all_devices(self.active_devices)
             return 1
         else:
             return self.pipeline_profile
+
+    def start_all_devices(self,reload=True,verbose=False):
+        '''
+        start all attached devices
+
+        reload:
+            - search again for all attached devices
+
+        '''
+        self.dev = (not reload and self.dev) or self.context.query_devices()
+        verbose = verbose or self.verbose
+
+        pipelines = []
+        dev_infos = []
+        pipeline_profiles = []
+        for d in self.dev:
+            pipe = rs.pipeline(self.context)
+            dev_info = self.get_sensor_info(d)
+            self.config.enable_device(dev_info['serial_number'])
+            pipeline_profile = self.start(pipeline=pipe,config=self.config)
+            if (self.verbose):
+                print(f'started {dev_info["name"]} S/N: {dev_info["serial_number"]}')
+            # store in list
+            pipelines.append(pipe)
+            dev_infos.append(dev_info)
+            pipeline_profiles.append(pipeline_profile)
+        self.active_devices = {'dev': self.dev,\
+                'pipelines':pipelines,\
+                'dev_infos':dev_infos,\
+                'pipeline_profiles':pipeline_profiles}
+        return self.active_devices
+       
+ 
+    def stop_all_devices(self,active_devices=None,verbose=False):
+        active_devices = active_devices or self.active_devices
+        verbose = self.verbose or verbose
+
+        for pipe,dev_info in zip(active_devices['pipelines'],active_devices['dev_infos']):
+            self.stop(pipeline=pipe)
+            if verbose:
+                print(f'stopped {dev_info["name"]} S/N: {dev_info["serial_number"]}')               
+
+    def get_sensor_info(self,dev):
+        camera_info = {}
+        for k in rs.camera_info.__members__.keys():
+            try:
+                camera_info[k] = dev.get_info(rs.camera_info.__members__[k])
+            except:
+                pass
+        return(camera_info)
         
     def start(self,pipeline=None,config=None):
         pipeline = pipeline or self.pipeline
@@ -110,6 +162,24 @@ class lidar_control():
     def purge_camera(self):
         del self.camnera
         self.camera = []
+
+    def load_settings(self,filename,append=False):
+        '''
+        load settings from json file
+
+        These can be written from the realsense viewer
+
+        Use append=True to append to any existing settings
+        '''
+        try:
+            settings = json.load(open(filename,'r'))
+            if append:
+                self.settings.update(settings)
+            else:
+                self.settings = settings
+        except:
+            print(f'failed to load settings file {filename}')
+
 
     def get_pointcloud(self,depth_frame,image_frame,pc_file=None):
         '''
@@ -321,6 +391,8 @@ class lidar_control():
 
 def main():
     l = lidar_control()
+    l.load_settings('short_range_settings.json')
+
     l.init(stop=False)
     camera = l.read_from_camera()
     
