@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt           # 2D plotting library producing public
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import pyrealsense2 as rs                 # Intel RealSense cross-platform open-source API
 import json
+from pathlib import Path
+
 
 try:
     import pyglet
@@ -36,7 +38,9 @@ class lidar_control():
     def __init__(self,decimate_scale=0,postprocessing=None,\
                       color=True,colour=True,\
                       nir=True,depth=True,\
-                      verbose=True):
+                      decimate=0,\
+                      colourised=True,colorized=False,\
+                      verbose=False):
         '''
         setup
         '''
@@ -48,6 +52,8 @@ class lidar_control():
         self.settings = {}
         self.dev = None
         self.verbose = verbose
+        self.colorized = (colourised or colorized)
+        self.decimate = decimate
 
         # active device lists
         self.active_devices = []
@@ -190,26 +196,38 @@ class lidar_control():
             print(f'failed to load settings file {filename}')
 
 
-    def get_pointcloud(self,depth_frame,image_frame,pc_file=None):
+    def save_pointcloud(self,device,pc_file=None,\
+                            verbose=False,format='npz'):
         '''
         get pointcloud data from depth and image frames
 
         option to save to ply file if pc_file is set
 
         '''
+        verbose = verbose or self.verbose
+
+        image = device['datasets'][device['camera']['bands'] == 'color']
+        depth = device['datasets'][device['camera']['bands'] == 'depth']
+    
+        pc_file = pc_file or 'lidar'
+        fn = "{:010d}".format(depth.frame_number)
+        op_file = Path(f'{pc_file}_{fn}.{format}').as_posix()
+            
         pc = rs.pointcloud()
-        pc.map_to(image_frame)
-        points = pc.calculate(depth_frame)
+        pc.map_to(image)
+        points = pc.calculate(depth)
 
-        camera = {}
-        camera['pc'] = pc
-        camera['points'] = points
-        if pc_file:
-            camera['pc_file'] = pc_file
-            print(f'writing point cloud to {pc_file}')
-            points.export_to_ply(pc_file,image_frame)
+        h,w = device['camera']['h'], device['camera']['w']
 
-        return camera
+        verts = np.asarray(points.get_vertices(2)).reshape(h*w, 3)
+        texcoords = np.asarray(points.get_texture_coordinates(2)).reshape(h*w,2)
+        mask = np.isclose((verts*verts).sum(axis=1),0)
+        verts = verts[~mask]
+        texcoords = texcoords[~mask]
+        if(verbose):
+            print(f'{op_file}: {verts.shape[0]} points')
+        np.savez(op_file,verts=verts,texcoords=texcoords)
+        return op_file
 
     def is_nir_sensor(self,s):
         '''
@@ -219,6 +237,12 @@ class lidar_control():
         Could refine this -- eg has same size as depth
         '''
         return (not s.is_depth_sensor()) and (not s.is_color_sensor())
+
+    def first_nir_sensor(self,dev):
+        '''
+        placeholder like is_nir_sensor
+        '''
+        return dev.first_depth_sensor()
 
     def enable_stream(self,device,\
                            depth=True,nir=True,colour=True,color=False,\
@@ -244,6 +268,7 @@ class lidar_control():
         # there is no self.is_nir_sensor()
         # so we have a placeholder
         info = {
+            'none'  : (None,0,0,0,0,0),
             'nir'   : (rs.stream.infrared, 0, *size, rs.format.y8,fps),
             'color' : (rs.stream.color, 0, *(image_size or size), rs.format.rgb8,fps),
             'depth' : (rs.stream.depth, 0, *size, rs.format.z16,fps)
@@ -251,22 +276,27 @@ class lidar_control():
 
         camera['sets'] = []
         camera['sensors'] = []
+        camera['bands'] = []
         for i,s in enumerate(device['sensors']):
 
             if verbose:
                 print(f'sensor {i} of {len(device["sensors"])}')
 
-            settings =  ((depth and s.is_depth_sensor() and info['depth']) or \
-                        (nir and self.is_nir_sensor(s) and info['nir']) or \
-                        (color and s.is_color_sensor() and info['color']))
-            settings = list(settings)
+            itype =    ((depth and s.is_depth_sensor() and 'depth') or \
+                        (nir and self.is_nir_sensor(s) and 'nir') or \
+                        (color and s.is_color_sensor() and 'color') or \
+                         'none')
+
+            settings = list(info[itype])
             settings[1] = i
+
             if verbose:
+                print(f'stream type: {itype}')
                 print(f'stream settings: {settings}')
             conf.enable_stream(*settings)
 
             sensor  =  (depth and s.is_depth_sensor() and dev.first_depth_sensor()) or \
-                        (nir and self.is_nir_sensor(s) and dev.first_infrared_sensor()) or \
+                        (nir and self.is_nir_sensor(s) and self.first_nir_sensor(dev)) or \
                         (color and s.is_color_sensor() and dev.first_color_sensor())
 
             print(f'sensor: {sensor}')
@@ -275,8 +305,11 @@ class lidar_control():
                 camera['depth_scale'] = camera['depth_scale'] or (depth and s.is_depth_sensor() and sensor.get_depth_scale())
             except:
                 pass
+            camera['bands'].append(itype)
             camera['sets'].append(settings)
             camera['sensors'].append(sensor)
+            if verbose:
+                print(camera)
 
         imu_streams = (rs.stream.accel,rs.stream.gyro)
         imu_formats = (rs.format.motion_xyz32f, rs.format.motion_xyz32f)
@@ -304,38 +337,82 @@ class lidar_control():
                rs.temporal_filter(),
                rs.disparity_transform(False)]
 
-    def get_frames(self,camera,p):
+    def click(self,verbose=False,save=True):
+        '''
+        click
+        '''
+        ofiles = []
+        for device in self.active_devices:
+            # grab
+            self.get_frames(device,verbose=verbose)
+            if save:
+                sn = device['device_info']['serial_number']
+                dn = device['device_info']['name'].replace(' ','_')
+                pc_dir = Path(dn).joinpath(sn)
+                pc_dir.mkdir(parents=True, exist_ok=True)
+                pc_file = pc_dir.joinpath('lidar')
+                
+                ofile = self.save_pointcloud(device,pc_file=pc_file,\
+                            verbose=verbose,format='npz')
+                ofiles.append(ofile)
+        return(ofiles)
+
+    def plot_frames(self):
+        for device in self.active_devices:
+            self.plot(device['datasets'],file=None)
+
+    def get_frames(self,device,decimate=0,verbose=False,colourised=True,colorized=True):
 
         '''
-        grab the frames
+        grab the frames from device
         '''
-        camera['frames'] = p.wait_for_frames()
+        decimate = decimate or self.decimate
+        verbose = verbose or self.verbose
+        colorized = (colourised or colorized) or self.colorized
 
-        if not camera['frames']:
-            print('No frames from camera')
-            return 0
+        camera = device['camera']
 
-        camera['depth'] = camera['frames'].get_depth_frame().as_video_frame()
-        camera['color'] = camera['frames'].first(camera['image_stream']).as_video_frame()
-        camera['nir'] = camera['frames'].first(camera['nir_stream']).as_video_frame()
- 
-        if self.decimate_scale > 0:
-            camera['depth'] = decimate.process(camera['depth'])
+        try:
+            p = device['pipe']
+            frames = p.wait_for_frames()
+            # loop over the sensors
+            datasets = [frames.first(s[0]) for s in camera['sets']]
 
-        if self.postprocessing:
-            for f in camera['filters']:
-                camera['depth'] = f.process(camera['depth'])
 
-        # Grab new intrinsics (may be changed by decimation)
-        camera['depth_intrinsics'] = rs.video_stream_profile(camera['depth'].profile).get_intrinsics()
-        camera['w'], camera['h'] = camera['depth_intrinsics'].width, camera['depth_intrinsics'].height
+            # do a colorized depth frame
+            
+            depth = datasets[camera['bands'] == 'depth']
+            if self.decimate_scale > 0:
+                depth = decimate.process(depth)
 
-        camera['colorized_depth'] = colorizer.colorize(camera['depth'])
+            if self.postprocessing and 'filters' in camera.keys():
+                for f in camera['filters']:
+                    if verbose:
+                        print(f'applying post-processing filter {f}')
+                    depth = f.process(depth)
 
-        self.stop()
-        self.camera.append(camera)
-        print('Done')
-        return camera
+            # load back in
+            datasets[camera['bands'] == 'depth'] = depth
+
+            if colorized:
+                colorizer = rs.colorizer()
+                cdepth = colorizer.colorize(depth)
+                datasets.append(cdepth)
+
+            if self.decimate_scale > 0:
+                # Grab new intrinsics (may be changed by decimation)
+                camera['depth_profile'] = rs.video_stream_profile(depth.profile)
+                camera['depth_intrinsics'] = camera['depth_profile'].get_intrinsics()
+                camera['w'], camera['h'] = camera['depth_intrinsics'].width, camera['depth_intrinsics'].height
+
+            # copy back in
+            device['datasets'] = datasets
+            device['camera'] = camera
+
+        except:
+            pass
+
+        return device
 
     def to_np(self,frames):
         '''
@@ -354,71 +431,55 @@ class lidar_control():
         np.array(dst, copy=False)[:] = src.ravel()
         # ctypes.memmove(dst, src.ctypes.data, src.nbytes)
 
-    def not_here(self):
-   
-        vertex_list = pyglet.graphics.vertex_list(
-        self.w * self.h, 'v3f/stream', 't2f/stream', 'n3f/stream')
- 
-        pc = rs.pointcloud()
-        points = pc.calculate(depth_frame)
-        pc.map_to(mapped_frame)
-
-        # handle color source or size change
-        fmt = convert_fmt(mapped_frame.profile.format())
-        other_profile = rs.video_stream_profile(profile.get_stream(other_stream))
-
-
-        global image_data
-        if (image_data.format, image_data.pitch) != (fmt, color_source.strides[0]):
-            empty = (gl.GLubyte * (self.w * self.h * 3))()
-            image_data = pyglet.image.ImageData(self.w, self.h, fmt, empty)
-            # copy image data to pyglet
-            image_data.set_data(fmt, color_source.strides[0], color_source.ctypes.data)
-
-        verts = np.asarray(points.get_vertices(2)).reshape(h, w, 3)
-        texcoords = np.asarray(points.get_texture_coordinates(2))
-
-        if len(vertex_list.vertices) != verts.size:
-            vertex_list.resize(verts.size // 3)
-            # need to reassign after resizing
-            vertex_list.vertices = verts.ravel()
-            vertex_list.tex_coords = texcoords.ravel()
-
-   
-        self.copy(vertex_list.vertices, verts)
-        self.copy(vertex_list.tex_coords, texcoords)
-
-        if self.lighting:
-            # compute normals
-            dy, dx = np.gradient(verts, axis=(0, 1))
-            n = np.cross(dx, dy)
-
-            # can use this, np.linalg.norm or similar to normalize, but OpenGL can do this for us, see GL_NORMALIZE above
-            # norm = np.sqrt((n*n).sum(axis=2, keepdims=True))
-            # np.divide(n, norm, out=n, where=norm != 0)
-
-            # import cv2
-            # n = cv2.bilateralFilter(n, 5, 1, 1)
-
-            self.copy(vertex_list.normals, n)
-
-        if keys[pyglet.window.key.E]:
-            points.export_to_ply('./out.ply', mapped_frame)
-
-    def plot(self,frames,centiles=None,\
+    def plots(self,active_devices=None,verbose=False,\
+                         centiles=None,\
                          titles=None,\
                          cmaps=None,\
                          figsize=None,\
                          file=None,\
                          dummy=False,\
+                         format='png',\
+                         transpose=False):
+        '''
+        plot for all devices
+        '''
+        active_devices = active_devices or self.active_devices 
+
+        for device in active_devices:
+            frames = device['datasets']
+            self.plot(frames,verbose=verbose,\
+                         centiles=centiles,\
+                         titles=titles,\
+                         cmaps=cmaps,\
+                         figsize=figsize,\
+                         file=file,\
+                         dummy=dummy,\
+                         format=format,\
+                         transpose=transpose)
+
+    def plot(self,frames,verbose=False,\
+                         centiles=None,\
+                         titles=None,\
+                         cmaps=None,\
+                         figsize=None,\
+                         file=None,\
+                         dummy=False,\
+                         format='png',\
                          transpose=False):
 
-
         result = self.to_np(frames)
+        verbose = verbose or self.verbose
+
+        try:
+            plt.clf()
+        except:
+            if verbose:
+                print('unable to do interactive plot')
+            dummy = True
 
         if dummy:
             matplotlib.use('Agg')
-        figsize = figsize or (20,20)
+        figsize = figsize or (20,10)
         nr = (2 * ((len (result) +1)// 2))
         print(nr)
         nx = nr-nr//2
@@ -429,10 +490,10 @@ class lidar_control():
         fig, axs = plt.subplots(shape[1],shape[0],figsize=figsize)
         axs = np.array(axs).flatten()
 
-        cmaps = cmaps or [None,plt.get_cmap('gray'),None,None]
-        titles = titles or ['range','NIR','colour','colourised depth']
+        cmaps = cmaps or [None,None,plt.get_cmap('gray'),None]
+        titles = titles or ['range','colour','NIR','colourised depth']
         print (shape)
-        centiles = centiles or [(10,70),(25,95),(25,75),(5,95)]
+        centiles = centiles or [(10,70),(25,75),(25,95),(5,95)]
       
         for i in range(nr):
             try:
@@ -444,31 +505,32 @@ class lidar_control():
 
                 im = axs[i].imshow(r,vmin=rmin,vmax=rmax,cmap=cmaps[i])
                 axs[i].title.set_text(titles[i])
-                if i != 2:
+                if i != 1:
                    divider = make_axes_locatable(axs[i])
                    cax = divider.append_axes('right', size='5%', pad=0.05)
                    fig.colorbar(im, cax=cax, orientation='vertical')
             except:
                 pass
     
-        if file:
-            fig.savefig(file)
+        if dummy:
+            file = file or 'lidar'
+            fn = "{:010d}".format(frames[0].frame_number)
+            op_file = f'{file}_{fn}.{format}'
+            if verbose:
+                print(f'saving plot to {op_file}')
+            fig.savefig(op_file)
 
 def main():
-    l = lidar_control()
-    l.load_settings('short_range_settings.json')
+    self = lidar_control()
+    self.load_settings('short_range_settings.json')
+    self.init(stop=False)
 
-    l.init(stop=False)
-    camera = l.read_from_camera()
+    self.click(save=True,verbose=True)
+
+    # d stores information 
+    d = self.stop_all_devices()
+    self.plots(d,verbose=True,dummy=True)
     
-    camera['pc'] = l.get_pointcloud(camera['depth'],\
-                          camera['color'],\
-                          pc_file='points.ply')
-
-    frames = [camera['depth'],camera['nir'],camera['color'],camera['colorized_depth']]
-    l.plot(frames,dummy=True,file='result.png')
-
-    l.stop_all_devices()
 
 if __name__== "__main__" :
     main()
