@@ -17,7 +17,6 @@ import pyrealsense2 as rs                 # Intel RealSense cross-platform open-
 import json
 from pathlib import Path
 
-
 try:
     import pyglet
     import pyglet.gl as gl
