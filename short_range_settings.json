@@ -2,7 +2,7 @@
     "Ambient Light": 1,
     "Apd Temperature": -9999,
     "Avalanche Photo Diode": 9,
-    "Confidence Threshold": 1,
+    "Confidence Threshold": 0.5,
     "Depth Offset": 4.5,
     "Depth Units": 0.000250000011874363,
     "Error Polling Enabled": 1,
@@ -15,7 +15,7 @@
     "Lld Temperature": 45.4481468200684,
     "Ma Temperature": 42.3421325683594,
     "Mc Temperature": 43.8432769775391,
-    "Min Distance": 245,
+    "Min Distance": 0,
     "Noise Filtering": 3,
     "Post Processing Sharpening": 1,
     "Pre Processing Sharpening": 0.0,
@@ -24,7 +24,7 @@
     "Zero Order Enabled": 0.0,
     "stream-depth-format": "Z16",
     "stream-fps": "30",
-    "stream-height": "480",
+    "stream-height": "768",
     "stream-ir-format": "Y8",
-    "stream-width": "640"
+    "stream-width": "1024"
 }

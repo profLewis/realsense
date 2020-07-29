@@ -67,6 +67,7 @@ class lidar_control():
         https://github.com/IntelRealSense/librealsense/tree/master/examples/multicam
 
         '''
+        print('Setting up Environment')
         verbose = verbose or self.verbose
         self.context = rs.context()
         self.config = rs.config()
@@ -222,16 +223,26 @@ class lidar_control():
                 print('unable to save pointcloud: no datasets')
             return None
 
-        image = device['datasets'][device['camera']['bands'] == 'color']
-        depth = device['datasets'][device['camera']['bands'] == 'depth']
-    
+        camera = device['camera']
+        bands = camera['bands']
+
+        data = [np.asanyarray(f.get_data()) for f in device['datasets']]
+  
+        image = data[bands.index('color')]
+        depth = data[bands.index('depth')]
+        nir = data[bands.index('nir')]
+        if 'cdepth' in bands:
+            cdepth = data[bands.index('cdepth')]
+        else:
+            cdepth = None
+
         pc_file = pc_file or 'lidar'
-        fn = "{:010d}".format(depth.frame_number)
+        fn = f'{camera["timestamp"]}_{camera["frame_number"]}'
         op_file = Path(f'{pc_file}_{fn}.{format}').as_posix()
             
         pc = rs.pointcloud()
-        pc.map_to(image)
-        points = pc.calculate(depth)
+        pc.map_to(device['datasets'][bands.index('color')])
+        points = pc.calculate(device['datasets'][bands.index('depth')])
 
         h,w = device['camera']['h'], device['camera']['w']
 
@@ -242,7 +253,12 @@ class lidar_control():
         texcoords = texcoords[~mask]
         if(verbose):
             print(f'{op_file}: {verts.shape[0]} points')
-        np.savez(op_file,verts=verts,texcoords=texcoords)
+
+        # dont store the depth 
+        np.savez(op_file,verts=verts,texcoords=texcoords,\
+                         meta=camera['meta'],\
+                         depth=depth,\
+                         image=image,nir=nir,cdepth=cdepth)
         return op_file
 
     def enable_streams(self,device,\
@@ -428,7 +444,7 @@ class lidar_control():
 
     def get_frames(self,device,\
                         nframes=1,\
-                        align=False,\
+                        align=True,\
                         decimate=0,\
                         verbose=False,\
                         colourised=True,colorized=True):
