@@ -1,0 +1,5 @@
+#!/bin/bash
+here=`pwd`
+
+git reset --hard HEAD
+git pull
