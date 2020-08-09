@@ -1,0 +1,9 @@
+#!/bin/bash
+
+docker login
+# clean out previous images
+docker rm $(docker ps --filter=status=exited --filter=status=created -q)
+docker build . --file Docker/Dockerfile --tag proflewis/realsense
+docker push proflewis/realsense
+
+

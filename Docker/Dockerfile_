@@ -1,0 +1,29 @@
+FROM jupyterhub/jupyterhub
+
+USER root
+RUN apt-get update &&  apt-get install sudo
+RUN apt-get install nodejs npm
+RUN rm -rf /usr/local/lib/node_modules/configurable-http-proxy && \
+    npm install -g configurable-http-proxy
+RUN python3 -m pip install jupyterhub 
+
+FROM jgomezdans/uclgeog
+
+USER $NB_USER
+
+COPY .jupyter/* /home/jovyan/.jupyter/
+RUN mkdir -p .ssh
+COPY .ssh/* /home/jovyan/.ssh/
+COPY *.py /home/jovyan/
+COPY *.json /home/jovyan/
+COPY lidar_control.ipynb  /home/jovyan/
+RUN mkdir -p /home/jovyan/bin
+COPY bin/* /home/jovyan/bin/
+#RUN git clone https://github.com/IntelRealSense/librealsense.git
+RUN python3 -m pip install pyrealsense2 sudospawner 
+RUN  conda install -c anaconda pycurl 
+USER root
+RUN fix-permissions /home/jovyan/.?*  /home/jovyan
+RUN chown jovyan  /home/jovyan/.?*/* *
+USER $NB_USER
+
